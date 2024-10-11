@@ -154,7 +154,9 @@ class Value(object):
           if isinstance(value, Table):
             value_str = f"{value_str}" + "{" + f"\t{indentation}{value.__str__(indent + 1)}\n\t{indentation}" + "},\n\t"
       if value_str:
-        return f"{v}: [\n\t{indentation}{value_str}\n\t{indentation}]"
+        return f"{v}: [\n\t{indentation}{value_str}{indentation}]"
+    if sub_type == self.SubType.TABLE:
+      return f"{v}: " + "{" + f"\t{indentation}{self.value}\n\t{indentation}" + "}"
     return f"{v}: {self.value}"
 
   class Type(Enum):
