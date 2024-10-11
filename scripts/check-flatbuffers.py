@@ -44,13 +44,20 @@ def is_binary_format(filename):
   return False, 0
 
 def read_binary_file_as_uint8(filename):
+  uint8_data = ""
   try:
     with open(filename, "rb") as f:
       binary_data = f.read()
       uint8_data = struct.unpack(f"{len(binary_data)}B", binary_data)
-      return uint8_data
   except Exception:
     return None
+  # try:
+  #   filename = "/".join(filename.split('/')[:-1] + ['struct.txt'])
+  #   with open(filename, "r") as f:
+  #     data = f.read()
+  # except Exception:
+  #   pass
+  return uint8_data
 
 def unpack(type, slice):
   format_char = type_to_struct_format.get(type, None)
@@ -76,7 +83,7 @@ def unsigned_to_signed(value, e):
   return value
 
 def is_array_like(obj):
-  return isinstance(obj, (Sequence, np.ndarray)) and not isinstance(obj, str)
+  return isinstance(obj, (list, Sequence, np.ndarray)) and not isinstance(obj, str)
 
 def is_bool_acceptable(slice):
   _, unsigned, val = is_byte_acceptable(slice)
@@ -121,64 +128,33 @@ def is_float_acceptable(slice):
 def is_double_acceptable(slice):
   return is_value_acceptable(slice, "double", 8, just_signed=True)
 
-def is_struct_acceptable(slice):
-  size = len(slice)
-  possible_sizes = [1, 2, 4, 8]
-  results = []
-  for element_size in possible_sizes:
-    if size % element_size == 0:
-      num_elements = size // element_size
-      signed = unsigned = real = False
-      acceptable = True
-      signed_values = []
-      unsigned_values = []
-      real_values = []
-      for i in range(num_elements):
-        val = val2 = None
-        element_slice = slice[i * element_size: (i + 1) * element_size]
-        if element_size == 2:
-          signed, unsigned, val = is_short_acceptable(element_slice)
-        elif element_size == 4:
-          signed, unsigned, val = is_int_acceptable(element_slice)
-          real, _, val2 = is_float_acceptable(element_slice)
-        elif element_size == 8:
-          signed, unsigned, val = is_long_acceptable(element_slice)
-          real, _, val2 = is_double_acceptable(element_slice)
-        if unsigned:
-          unsigned_values.append(val)
-        if signed:
-          signed_values.append(unsigned_to_signed(val, element_size))
-        if real:
-          real_values.append(val2)
-        if not (signed or unsigned or real):
-          acceptable = False
-          break
-      if acceptable:
-        results.append({
-          "element_size": element_size,
-          "signed_values": signed_values if len(signed_values) > 1 else [],
-          "unsigned_values": unsigned_values if len(unsigned_values) > 1 else [],
-          "real_values": real_values if len(real_values) > 1 else [],
-        })
-  if not results:
-    return False, []
-  return True, results
-
 class Value(object):
   def __init__(self, type=None, sub_type=None, numeric_type=None, value=None):
     self.type = self.Type.NONE if type is None else type
     self.sub_type = self.SubType.NONE if sub_type is None else sub_type
     self.numeric_type = self.NumericType.NONE if numeric_type is None else numeric_type
-    self.value = value = value
+    self.value = value
 
-  def __str__(self):
+  def __str__(self, indent=0):
+    indentation = "\t" * indent
+    sub_type = self.sub_type
     v = ""
     if self.type == self.Type.NONE:
       v = f"{self.type}"
-    if self.sub_type != self.SubType.NONE:
-      v = f"{v}, {self.sub_type}" if v else f"{self.sub_type}"
+    if sub_type != self.SubType.NONE:
+      v = f"{v}, {sub_type}" if v else f"{sub_type}"
     if self.numeric_type != self.NumericType.NONE:
       v = f"{v}, {self.numeric_type}" if v else f"{self.numeric_type}"
+    if sub_type == self.SubType.STRING:
+      return f"{v}: '{self.value}'"
+    if is_array_like(self.value):
+      value_str = ""
+      for value in self.value:
+        if sub_type and not sub_type == self.SubType.TABLE:
+          if isinstance(value, Table):
+            value_str = f"{value_str}" + "{" + f"\t{indentation}{value.__str__(indent + 1)}\n\t{indentation}" + "},\n\t"
+      if value_str:
+        return f"{v}: [\n\t{indentation}{value_str}\n\t{indentation}]"
     return f"{v}: {self.value}"
 
   class Type(Enum):
@@ -219,7 +195,7 @@ class Defer(object): # OFFSET, VECTOR, <NUMERIC_TYPE>
     self.competitor = competitor
 
 class Field(object):
-  def __init__(self, table, id, start, end):
+  def __init__(self, table, id, start=-1, end=-1):
     self.table_ = table
     self.id_ = id
     self.start_ = start
@@ -227,7 +203,19 @@ class Field(object):
     self.values = []
 
   def __str__(self, indent=1):
-    indentation = "\t" * (indent)
+    indentation = "\t" * indent
+    # def value_to_str(value, indent):
+    #   if isinstance(value, Table):
+    #     return f"\n{indentation}\t{value.__str__(indent + 1)}"
+    #   elif is_array_like(value):
+    #     return "[" + ", ".join(
+    #       [value_to_str(item, indent + 1) for item in value]
+    #     ) + "]"
+    #   else:
+    #     return str(value)
+    # value_str = "".join(
+    #   [f"\n{indentation}\t{value_to_str(value, indent)}" for value in self.values]
+    # )
     value_str = "".join([f"\n{indentation}\t{value.__str__(indent + 1) if isinstance(value, Table) else str(value)}" for value in self.values])
     return f"{indentation}[Field {self.id_}]\n{indentation}offset: {self.start_} ~ {self.end_}\n{indentation}values: " + "{" + f"{value_str}\n{indentation}" + "}"
 
@@ -248,6 +236,7 @@ class Table(object):
     return f"{indentation}\n{field_str}"
 
   def parse(self):
+    self.parser_.print(f"Parse table start from {self.start_}")
     try:
       byte_slice = self.parser_.bytestream_[self.start_:self.start_ + 4] # field size: 4B
       self.vtable_offset_ = unpack("int32", byte_slice) # soffset_t
@@ -261,19 +250,23 @@ class Table(object):
       return False
 
   def parse_meta(self):
+    self.parser_.print("Parse table metadata")
     vtable_start = self.start_ - self.vtable_offset_
     if vtable_start < 0:
       return False
     self.vtable_start_ = vtable_start
+    self.parser_.print(f"vtable_start: {vtable_start}")
     byte_slice = self.parser_.bytestream_[vtable_start:vtable_start + 2] # vtable offset size: 2B
     vtable_size = unpack("uint16", byte_slice) # voffset_t
     if vtable_size < 1:
       return False
+    self.parser_.print(f"vtable_size: {vtable_size}")
     self.vtable_size_ = vtable_size
     if not self.parser_.validate(vtable_start, 2, just_check=True):
       return False
     byte_slice = self.parser_.bytestream_[vtable_start + 2:vtable_start + 4]
     table_size = unpack("uint16", byte_slice)
+    self.parser_.print(f"table_size: {table_size}")
     if table_size < 1:
       return False
     self.table_size_ = table_size
@@ -282,12 +275,14 @@ class Table(object):
     end = self.start_ + table_size
     if end >= self.parser_.size_:
       return False
+    self.parser_.print(f"end: {end}")
     self.end_ = end
     byte_slice = self.parser_.bytestream_[vtable_start + 4:vtable_start + vtable_size]
     num_fields = len(byte_slice) / 2
     if has_decimal_point(num_fields):
       return False
     num_fields = int(num_fields)
+    self.parser_.print(f"num_fields: {num_fields}")
     fields_offset = [unpack("uint16", byte_slice[i * 2:i * 2 + 2]) for i in range(0, num_fields)]
     fields_offset_indices = get_order_indices(fields_offset)
     for i, idx in enumerate(fields_offset_indices):
@@ -299,7 +294,13 @@ class Table(object):
     return self.parser_.validate(vtable_start, (end - vtable_start))
 
   def parse_fields(self):
+    self.parser_.print("Parse table fields")
     for field in self.fields_:
+      if field.start_ == 0:
+        field.start_ = 0
+        field.end_ = 0
+        field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.BOOL, value=False))
+        continue
       field_start = self.start_ + field.start_
       field_end = self.start_ + field.end_
       size = field_end - field_start
@@ -339,7 +340,6 @@ class Table(object):
           self.parser_.validate(field_start, size, just_mark=True)
           value = unsigned_to_signed(val, 32)
           field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.NUMERIC, numeric_type=Value.NumericType.INT32, value=value))
-        # float
         signed, _, val = is_float_acceptable(byte_slice)
         if signed:
           self.parser_.validate(field_start, size, just_mark=True)
@@ -352,20 +352,23 @@ class Table(object):
         if signed:
           self.parser_.validate(field_start, size, just_mark=True)
           field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.NUMERIC, numeric_type=Value.NumericType.INT64, value=unsigned_to_signed(val, 64)))
-        # double
         signed, _, val = is_double_acceptable(byte_slice)
         if signed:
           self.parser_.validate(field_start, size, just_mark=True)
           field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.NUMERIC, numeric_type=Value.NumericType.DOUBLE, value=val))
       ######################################## struct check
-      ret, results = is_struct_acceptable(byte_slice)
+      ret, results = self.parser_.is_struct_acceptable(byte_slice)
       if ret:
         for result in results:
           element_size = result.get("element_size")
+          booled_values = result.get("booled_values")
           signed_values = result.get("signed_values")
           unsigned_values = result.get("unsigned_values")
           real_values = result.get("real_values")
           numeric_type = int(math.log2(element_size)) + 1
+          if booled_values:
+            self.parser_.validate(field_start, size, just_mark=True)
+            field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.BOOL, value=booled_values))
           if signed_values:
             self.parser_.validate(field_start, size, just_mark=True)
             field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.STRUCT, numeric_type=Value.NumericType(numeric_type), value=signed_values))
@@ -377,8 +380,10 @@ class Table(object):
             field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.STRUCT, numeric_type=Value.NumericType(numeric_type + 20), value=real_values))
 
   def parse_offset(self, field, start):
+    self.parser_.print("Parse table offset")
     byte_slice = self.parser_.bytestream_[start:start + 4]
     _, unsigned, value = is_int_acceptable(byte_slice)
+    self.parser_.print(f"is offset acceptable? {unsigned} ({value})")
     if not unsigned:
       return False
     if value == 0: # TODO: check string or vector
@@ -391,19 +396,21 @@ class Table(object):
         field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.TABLE, value=table))
         return True
       str_ret, val = self.parser_.is_string_acceptable(start + 4, value)
+      self.parser_.print(f"is string acceptable: {str_ret} ({val})")
       vec_ret, result = self.parser_.is_vector_acceptable(start + 4, value)
       vectors = result.get("vectors", [])
       sizes = result.get("sizes", [])
       t = result.get("type", Value.SubType.NONE)
+      self.parser_.print(f"is vector acceptable: {vec_ret} ({vectors} - {t})")
       if not vectors and t is Value.SubType.UNKNOWN and not sizes:
         self.parser_.deferred.append(Defer(start=start, field=field, competitor=val if str_ret else ""))
         return True
       if vec_ret:
-          for i, v in enumerate(vectors):
-            s, l = sizes[i]
-            ret = self.parser_.validate(s, l + 4 * value)
-            field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.VECTOR, value=v))
-          return True
+        for i, v in enumerate(vectors):
+          s, l = sizes[i]
+          ret = self.parser_.validate(s, l + 4 * value)
+        field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.VECTOR, value=vectors))
+        return True
       elif str_ret:
         ret = self.parser_.validate(start, value + 4)
         field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.STRING, value=val))
@@ -411,9 +418,10 @@ class Table(object):
     return False
 
 class Parser:
-  def __init__(self, bytestream, align=4):
+  def __init__(self, bytestream, align=4, verbose=False):
     self.bytestream_ = bytestream
     self.align_= align
+    self.verbose = verbose
     self.visited_bitmap_ = [0] * len(bytestream)
     self.deferred = [] # primitive value vector
     self.size_ = len(bytestream)
@@ -443,6 +451,7 @@ class Parser:
     return True
 
   def parse_deferred(self):
+    self.print(f"Parse deferred vector ({len(self.deferred)})")
     for defer in self.deferred:
       start = defer.start
       possible_end = self.get_next_nonzero_index(start)
@@ -457,33 +466,36 @@ class Parser:
           defer.field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.STRING, value=comp))
           continue
       pause = False
-      if possible_end - start < 1:
+      if possible_end - start < 4:
         continue
       while not pause:
-        byte_slice = self.bytestream_[start:possible_end]
-        ret, results = is_struct_acceptable(byte_slice)
-        if not ret:
-          possible_end = possible_end - 1
-          if self.visited_bitmap_[possible_end] == 1:
-            pause = True
-          continue
-        size = possible_end - start
-        for result in results:
-          element_size = result.get("element_size", 0)
-          signed_values = result.get("signed_values", [])
-          unsigned_values = result.get("unsigned_values", [])
-          real_values = result.get("real_values", [])
-          numeric_type = int(math.log2(element_size)) + 1
-          if signed_values:
-            self.validate(start, size, just_mark=True)
-            defer.field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.STRUCT, numeric_type=Value.NumericType(numeric_type), value=signed_values))
-          if unsigned_values:
-            self.validate(start, size, just_mark=True)
-            defer.field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.STRUCT, numeric_type=Value.NumericType(numeric_type + 10), value=unsigned_values))
-          if real_values:
-            self.validate(start, size, just_mark=True)
-            defer.field.values.append(Value(type=Value.Type.PRIMITIVE, sub_type=Value.SubType.STRUCT, numeric_type=Value.NumericType(numeric_type + 20), value=real_values))
-        pause = True
+        byte_slice = self.bytestream_[start: start + 4]
+        _, unsigned, val = is_int_acceptable(byte_slice)
+        if unsigned:
+          byte_slice = self.bytestream_[start + 4:possible_end]
+          ret, results = self.is_struct_acceptable(byte_slice, val)
+          if not ret:
+            possible_end = possible_end - 1
+            if self.visited_bitmap_[possible_end] == 1:
+              pause = True
+            continue
+          size = possible_end - start
+          for result in results:
+            element_size = result.get("element_size", 0)
+            signed_values = result.get("signed_values", [])
+            unsigned_values = result.get("unsigned_values", [])
+            real_values = result.get("real_values", [])
+            numeric_type = int(math.log2(element_size)) + 1
+            if signed_values:
+              self.validate(start, size, just_mark=True)
+              defer.field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.VECTOR, numeric_type=Value.NumericType(numeric_type), value=signed_values))
+            if unsigned_values:
+              self.validate(start, size, just_mark=True)
+              defer.field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.VECTOR, numeric_type=Value.NumericType(numeric_type + 10), value=unsigned_values))
+            if real_values:
+              self.validate(start, size, just_mark=True)
+              defer.field.values.append(Value(type=Value.Type.OFFSET, sub_type=Value.SubType.VECTOR, numeric_type=Value.NumericType(numeric_type + 20), value=real_values))
+          pause = True
 
   def is_table_acceptable(self, start):
     table = Table(self, start)
@@ -583,6 +595,67 @@ class Parser:
     }
     return True, result
 
+  def is_struct_acceptable(self, slice, size=0):
+    s = len(slice)
+    if s < 2:
+      return False, []
+    possible_sizes = [1, 2, 4, 8]
+    results = []
+    for element_size in possible_sizes:
+      if s % element_size == 0:
+        num_elements = s // element_size
+        booled = signed = unsigned = real = False
+        acceptable = True
+        booled_values = []
+        signed_values = []
+        unsigned_values = []
+        real_values = []
+        for i in range(num_elements):
+          val0 = val = val2 = None
+          element_slice = slice[i * element_size: (i + 1) * element_size]
+          if element_size == 1:
+            booled, val0 = is_bool_acceptable(element_slice)
+            signed, unsigned, val = is_byte_acceptable(element_slice)
+          if element_size == 2:
+            signed, unsigned, val = is_short_acceptable(element_slice)
+          elif element_size == 4:
+            signed, unsigned, val = is_int_acceptable(element_slice)
+            real, _, val2 = is_float_acceptable(element_slice)
+          elif element_size == 8:
+            signed, unsigned, val = is_long_acceptable(element_slice)
+            real, _, val2 = is_double_acceptable(element_slice)
+          if booled:
+            booled_values.append(bool(val0))
+          if unsigned:
+            unsigned_values.append(val)
+          if signed:
+            signed_values.append(unsigned_to_signed(val, element_size))
+          if real:
+            real_values.append(val2)
+          if not (booled or signed or unsigned or real):
+            acceptable = False
+            break
+        if acceptable:
+          if size:
+            results.append({
+            "element_size": element_size,
+            "booled_values": booled_values if len(booled_values) == size else [],
+            "signed_values": signed_values if len(signed_values) == size else [],
+            "unsigned_values": unsigned_values if len(unsigned_values) == size else [],
+            "real_values": real_values if len(real_values) == size else [],
+            })
+          else:
+            results.append({
+              "element_size": element_size,
+              "booled_values": booled_values if len(booled_values) > 1 else [],
+              "signed_values": signed_values if len(signed_values) > 1 else [],
+              "unsigned_values": unsigned_values if len(unsigned_values) > 1 else [],
+              "real_values": real_values if len(real_values) > 1 else [],
+            })
+    if not results:
+      return False, []
+    return True, results
+
   def validate(self, start, count, just_check=False, just_mark=False):
     valid = False if start + count >= self.size_ else True
     valid = all(element == 0 for element in self.visited_bitmap_[start:start + count]) if valid else False
@@ -604,6 +677,10 @@ class Parser:
       all_values.extend(field.values)
     return all_values
 
+  def print(self, *args, **kwargs):
+    if self.verbose:
+      print(*args, **kwargs)
+
   def print_visited(self, start=0, end=0):
     base = 16
     i = start
@@ -624,7 +701,7 @@ def main(args):
   if bytestream is None:
     print("Fail to read binary file as uint8")
     sys.exit(2)
-  parser = Parser(bytestream)
+  parser = Parser(bytestream, verbose=args.verbose)
   ret = parser.parse()
   print("=========================================")
   for field in parser.root_table_.fields_:
@@ -638,6 +715,7 @@ if __name__ == "__main__":
   parser = ArgumentParser()
   parser.add_argument("file", type=str, help="Input flatbuffers-serialized file")
   parser.add_argument("-p", "--print", action="store_true", help="Print visited bitmap")
+  parser.add_argument("-v", "--verbose", action="store_true", help="Print intermediate process")
   args = parser.parse_args()
   little_endian = sys.byteorder == "little"
   endian = "<" if little_endian else ">"
